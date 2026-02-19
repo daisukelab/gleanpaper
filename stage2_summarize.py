@@ -165,11 +165,25 @@ def summarize(paper: dict, tags: list, cfg: dict, client: anthropic.Anthropic) -
 
 # ── Write digest file ─────────────────────────────────────────────────────────
 
+def title_slug(title: str, max_len: int = 40) -> str:
+    """Return a filesystem-safe slug from the title prefix (before first ':')."""
+    prefix = title.split(":")[0].strip() if ":" in title else title.strip()
+    slug = re.sub(r"[^\w\s-]", "", prefix)       # remove special chars
+    slug = re.sub(r"\s+", "-", slug.strip())      # spaces → hyphens
+    slug = re.sub(r"-{2,}", "-", slug)            # collapse multiple hyphens
+    return slug[:max_len].rstrip("-")
+
+
+def digest_filename(paper: dict) -> str:
+    slug = title_slug(paper["title"])
+    return f"{paper['source']}_{paper['source_id']}_{slug}.md"
+
+
 def write_digest(paper: dict, tags: list, summary: str, gleaned_date: date) -> Path:
     month_dir = DIGEST_DIR / gleaned_date.strftime("%Y-%m")
     month_dir.mkdir(parents=True, exist_ok=True)
 
-    filename = f"{paper['source']}_{paper['source_id']}.md"
+    filename = digest_filename(paper)
     path = month_dir / filename
 
     authors_yaml = "\n".join(f'  - "{a}"' for a in paper["authors"])
@@ -222,7 +236,7 @@ def find_latest_review() -> Path:
 
 
 def digest_path_for(paper: dict, target_date: date) -> Path:
-    return DIGEST_DIR / target_date.strftime("%Y-%m") / f"{paper['source']}_{paper['source_id']}.md"
+    return DIGEST_DIR / target_date.strftime("%Y-%m") / digest_filename(paper)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
