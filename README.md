@@ -44,14 +44,45 @@ arXiv API
 
 ---
 
+## Setup
+
+### 1. Create your `interests.yaml`
+
+`config/interests.yaml` is **not included** in this repository (it is personal and gitignored).
+You must create it before running the tool.
+
+The easiest way is to copy the provided example and edit it to match your interests:
+
+```bash
+cp config/examples/interests.yaml.example config/interests.yaml
+```
+
+Then open `config/interests.yaml` and customize:
+
+- **`fetch.categories`** — arXiv categories to monitor (e.g. `cs.LG`, `eess.AS`)
+- **`topics`** — define your research areas, each with a `tag`, `weight`, and `keywords` list
+- **`screening.min_score`** / **`top_n`** — control how strictly papers are filtered
+
+The example file (`config/examples/interests.yaml.example`) covers general ML/AI topics
+(LLMs, agents, diffusion models, alignment, etc.) and serves as a starting point.
+You can add as many topics and keywords as you like — topics can be temporarily disabled
+with `enabled: false` without losing your keyword list.
+
+```bash
+# Verify your config is valid and see keyword statistics
+python stage1_screen.py --check
+```
+
+---
+
 ## Quick Start
 
 ```bash
 # Install dependencies
 pip install -r requirements.txt
 
-# Check your interest config
-python stage1_screen.py --check
+# Create and edit your personal interest list (see Setup above)
+cp config/examples/interests.yaml.example config/interests.yaml
 
 # Fetch and screen today's papers
 python stage1_screen.py
