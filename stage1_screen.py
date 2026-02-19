@@ -11,6 +11,8 @@ Outputs:
 Usage:
   python stage1_screen.py                  # today
   python stage1_screen.py --date 2026-02-18
+  python stage1_screen.py --rescreen       # re-screen today, preserving existing tags
+  python stage1_screen.py --force          # re-screen today, overwriting everything
   python stage1_screen.py --check          # show config statistics
 """
 
@@ -225,6 +227,36 @@ def wrap_as_blockquote(text: str, line_width: int = 88) -> str:
     return "\n".join(lines)
 
 
+# ── Parse existing tags from review file ─────────────────────────────────────
+
+def parse_existing_tags(review_path: Path) -> dict:
+    """
+    Read an existing review Markdown and return {source_id: tags_string}.
+    Only entries where tags: is non-empty are returned.
+    """
+    if not review_path.exists():
+        return {}
+
+    existing = {}
+    current_id = None
+
+    with open(review_path, encoding="utf-8") as f:
+        for line in f:
+            line = line.rstrip("\n")
+            # Detect paper ID from HTML comment
+            m = re.search(r"<!--\s*source:\s*\w+\s*\|\s*id:\s*([\w.]+)", line)
+            if m:
+                current_id = m.group(1)
+                continue
+            # Detect tags line
+            if current_id and re.match(r"^tags:\s*\S", line):
+                tags_value = line[len("tags:"):].strip()
+                existing[current_id] = tags_value
+                current_id = None  # reset after capturing
+
+    return existing
+
+
 # ── Save screened JSON ────────────────────────────────────────────────────────
 
 def save_screened_json(papers: list, target_date: date, fetched: int) -> Path:
@@ -248,10 +280,15 @@ def save_screened_json(papers: list, target_date: date, fetched: int) -> Path:
 # ── Save review Markdown ──────────────────────────────────────────────────────
 
 def save_review_md(
-    papers: list, target_date: date, fetched: int, config: dict
+    papers: list,
+    target_date: date,
+    fetched: int,
+    config: dict,
+    existing_tags: dict = None,
 ) -> Path:
     REVIEW_DIR.mkdir(parents=True, exist_ok=True)
     path = REVIEW_DIR / f"{target_date}.md"
+    existing_tags = existing_tags or {}
 
     available_tags = [
         t["tag"]
@@ -259,13 +296,26 @@ def save_review_md(
         if t.get("enabled", True) and t.get("tag")
     ]
 
+    # Count how many existing tags will be restored
+    restored = sum(1 for p in papers if p["source_id"] in existing_tags)
+    new_count = len(papers) - restored
+
+    header_note = ""
+    if existing_tags:
+        header_note = (
+            f"> **再スクリーニング済み** — "
+            f"タグ保持: {restored}件 / 新規追加: {new_count}件"
+        )
+
     lines = [
         f"# arXiv Review — {target_date}",
         f"> 取得: {fetched}件 → スクリーニング: {len(papers)}件",
         f"> `tags:` にタグを書いた論文が要約されます → `python stage2_summarize.py`",
         f"> 利用可能なタグ: {', '.join(available_tags)}",
-        "",
     ]
+    if header_note:
+        lines.append(header_note)
+    lines.append("")
 
     if not papers:
         lines += [
@@ -285,6 +335,11 @@ def save_review_md(
             pdf_url = paper.get("pdf_url", "")
             pdf_link = f" | [PDF]({pdf_url})" if pdf_url else ""
 
+            # Restore existing tag or leave blank
+            restored_tag = existing_tags.get(paper["source_id"], "")
+            tag_line = f"tags: {restored_tag}" if restored_tag else "tags:"
+            tag_marker = "  ← restored" if restored_tag else ""
+
             lines += [
                 "---",
                 "",
@@ -294,7 +349,7 @@ def save_review_md(
                 f"`suggested: {suggested}`",
                 bq,
                 "",
-                "tags:",
+                tag_line + tag_marker,
                 "",
             ]
 
@@ -357,6 +412,16 @@ def main():
         action="store_true",
         help="Show config statistics and exit",
     )
+    parser.add_argument(
+        "--rescreen",
+        action="store_true",
+        help="Re-run screening for an existing date, preserving tags already entered",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite existing screened/review files without preserving tags",
+    )
     args = parser.parse_args()
 
     config = load_config()
@@ -372,6 +437,30 @@ def main():
             sys.exit(f"[error] Invalid date: {args.date}. Use YYYY-MM-DD.")
     else:
         target_date = date.today()
+
+    review_path = REVIEW_DIR / f"{target_date}.md"
+    json_path = SCREENED_DIR / f"{target_date}.json"
+
+    # Guard: warn if files already exist and neither --rescreen nor --force given
+    if (review_path.exists() or json_path.exists()) and not args.rescreen and not args.force:
+        print(f"[warn] Output files for {target_date} already exist:")
+        if json_path.exists():
+            print(f"       {json_path}")
+        if review_path.exists():
+            print(f"       {review_path}")
+        print(f"\n  Use --rescreen to re-run and preserve existing tags.")
+        print(f"  Use --force    to overwrite everything.")
+        sys.exit(0)
+
+    # Load existing tags before overwriting (--rescreen only)
+    existing_tags = {}
+    if args.rescreen and review_path.exists():
+        existing_tags = parse_existing_tags(review_path)
+        tagged_count = len(existing_tags)
+        if tagged_count:
+            print(f"[info] Found {tagged_count} tagged paper(s) — will preserve.")
+        else:
+            print(f"[info] No tags found in existing review file.")
 
     print(f"gleampaper Stage 1 — {target_date}")
     print("─" * 52)
@@ -390,8 +479,17 @@ def main():
     print(f"      → {json_path}")
 
     print("\n[4/4] Generating review Markdown...")
-    review_path = save_review_md(papers, target_date, fetched, config)
+    review_path = save_review_md(papers, target_date, fetched, config, existing_tags)
     print(f"      → {review_path}")
+
+    # Summary of tag preservation
+    if existing_tags:
+        restored = sum(1 for p in papers if p["source_id"] in existing_tags)
+        lost = len(existing_tags) - restored
+        print(f"      → tags restored: {restored}件", end="")
+        if lost:
+            print(f" / lost (no longer in results): {lost}件", end="")
+        print()
 
     print("\n" + "─" * 52)
     print("Done. Open the review file and add tags:")

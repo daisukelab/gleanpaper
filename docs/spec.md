@@ -289,7 +289,7 @@ tags: llm, mynewtag  ← 独自タグを追加することも可
 
 ---
 
-## Stage 2: 要約（`stage2_summarize.py`）— 将来実装
+## Stage 2: 要約（`stage2_summarize.py`）
 
 ### 入力
 
@@ -297,26 +297,29 @@ tags: llm, mynewtag  ← 独自タグを追加することも可
 |------|------|
 | `review/YYYY-MM-DD.md` | `tags:` が記入された論文の ID とタグを抽出 |
 | `screened/YYYY-MM-DD.json` | 該当 ID のフル情報（アブストラクト等）を取得 |
-| `config/summarize.yaml` | 使用モデル・プロンプト設定 |
+| `config/summarize.yaml` | 使用モデル・top_n 設定 |
 
 ### 処理フロー
 
 1. `review/YYYY-MM-DD.md` から `tags:` が空でない論文を抽出（ID・タグ一覧を取得）
 2. `screened/YYYY-MM-DD.json` から該当論文のフルデータを取得
-3. 各論文を Claude API に送信し要約生成（タグ・matched_topics をプロンプトに含める）
+3. スコア上位 `top_n` 件を Claude API に送信し要約生成
 4. 論文ごとに `digest/YYYY-MM/SOURCE_ID.md` を生成
 
-### プロンプト方針
+### 要約フォーマット（6項目）
 
-タグ・matched_topics を含め、**なぜ選ばれたかに焦点を当てた要約** を生成する。
+各項目は **できるだけ1行**で記述。重要な点が複数ある場合はそれぞれ1行。
+利用・言及された既存モデル／データセット／手法は、関連する行の直後に箇条書きで記載。
+論文に書かれていないことは類推・補足しない。
 
-```
-この論文はトピック [llm, agents] として分類されました。
-以下の観点で要約してください：
-1. 主な貢献（1文）
-2. 技術的な新規性
-3. 上記トピックとの関連ポイント
-```
+| # | 項目 | 内容 |
+|---|------|------|
+| 1 | **どんなもの？** | 論文の概要と目的 |
+| 2 | **先行研究と比べてどこがすごい？** | 新規性・独自性 |
+| 3 | **技術や手法の肝はどこ？** | コアアイデア・技術的ポイント |
+| 4 | **どうやって有効だと検証した？** | 実験・評価・比較方法 |
+| 5 | **議論はある？** | 限界・課題・議論点 |
+| 6 | **次に読むべき論文は？** | 論文内で言及された重要な関連研究 |
 
 ### 出力: `digest/YYYY-MM/SOURCE_ID.md`（論文 1 件につき 1 ファイル）
 
@@ -348,18 +351,34 @@ score: 27.0
 **Published**: 2026-02-19
 **Tags**: `llm` `agents`
 **URL**: https://arxiv.org/abs/2602.12345
+**PDF**: https://arxiv.org/pdf/2602.12345
 
-## Summary
+### 1. どんなもの？
+CoT プロンプティングに強化学習を組み合わせ、LLM の多段階推論精度を向上させる手法の提案。
 
-- **主な貢献**: RL を用いたステップレベル報酬設計により CoT の精度を 15% 改善
-- **技術的新規性**: 推論ステップごとに報酬を付与し、誤り訂正を段階的に学習
-- **関連ポイント**: LLM エージェントの計画・推論能力の向上に直接応用可能
+### 2. 先行研究と比べてどこがすごい？
+ステップ単位の報酬設計により、既存の最終出力ベースの RL より細粒度な誤り訂正が可能。
+
+### 3. 技術や手法の肝はどこ？
+各推論ステップに個別の報酬を与え、誤ったステップを直接ペナルティとして学習する。
+  - PPO（強化学習アルゴリズム）
+  - GPT-4（ベースモデル）
+
+### 4. どうやって有効だと検証した？
+GSM8K・MATH・BBH の3ベンチマークで SOTA と比較し、平均 15% の精度向上を確認。
+  - GSM8K、MATH、BBH（評価データセット）
+
+### 5. 議論はある？
+報酬モデルの品質に性能が依存するため、報酬ハッキングのリスクがある。
+ステップ単位のアノテーションコストが高く、大規模適用に課題が残る。
+
+### 6. 次に読むべき論文は？
+（アブストラクトからは不明）
 
 ## Abstract
 
 We propose a method that combines reinforcement learning with chain-of-thought
-prompting to improve multi-step reasoning. Our approach achieves 15% improvement
-on reasoning benchmarks by assigning step-level rewards...
+prompting to improve multi-step reasoning...
 ```
 
 **フロントマターを持たせる理由：**
