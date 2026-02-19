@@ -1,0 +1,311 @@
+version: 1
+
+# ══════════════════════════════════════════════════════════════════════════════
+# gleampaper — interests.yaml
+# ══════════════════════════════════════════════════════════════════════════════
+# arXiv カテゴリ一覧: https://arxiv.org/category_taxonomy
+
+# ── 取得設定 ──────────────────────────────────────────────────────────────────
+fetch:
+  categories:
+    primary:                    # 重点カテゴリ（スコアボーナス 1.0）
+      - cs.LG                   # Machine Learning
+      - cs.CL                   # Computation and Language
+      - cs.AI                   # Artificial Intelligence
+    secondary:                  # 補助カテゴリ（スコアボーナス 0.7）
+      - cs.CV                   # Computer Vision
+      - cs.RO                   # Robotics
+      - cs.NE                   # Neural and Evolutionary Computing
+      - stat.ML                 # Machine Learning (Statistics)
+  days_back: 1                  # 何日前まで遡るか（月曜は自動的に 3 に拡張）
+  max_results: 500              # API 1回あたりの最大取得件数
+
+# ── スクリーニング設定 ────────────────────────────────────────────────────────
+screening:
+  min_score: 5                  # この未満は除外
+  top_n: 50                     # スコア上位 N 件を保存
+
+# ── 除外キーワード ────────────────────────────────────────────────────────────
+# これらを含む論文はスコアに関わらず除外される
+exclude_keywords:
+  - "survey"
+  - "tutorial"
+  - "textbook"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# トピック定義
+# ──────────────────────────────────────────────────────────────────────────────
+# - name    : トピック名（表示用）
+# - tag     : タグ文字列（レビューファイルに suggested として表示、digest に記録）
+# - weight  : スコアの重み（1〜10、高いほど優先）
+# - enabled : false にすると一時的に無効化（キーワードを削除しなくてよい）
+# - keywords: タイトル・アブストラクトを検索するキーワードリスト
+#             大文字小文字は無視、フレーズマッチ対応
+#             タイトルマッチはアブストラクトマッチの 2 倍の重みで計算
+# ══════════════════════════════════════════════════════════════════════════════
+
+topics:
+
+  # ── Large Language Models ─────────────────────────────────────────────────
+  - name: "Large Language Models"
+    tag: "llm"
+    weight: 10
+    enabled: true
+    keywords:
+      - "large language model"
+      - "LLM"
+      - "language model"
+      - "GPT"
+      - "instruction tuning"
+      - "instruction following"
+      - "RLHF"
+      - "reinforcement learning from human feedback"
+      - "direct preference optimization"
+      - "DPO"
+      - "chain of thought"
+      - "chain-of-thought"
+      - "CoT"
+      - "in-context learning"
+      - "few-shot"
+      - "zero-shot"
+      - "prompt"
+      - "prompting"
+      - "tokenizer"
+      - "pretraining"
+      - "pre-training"
+      - "fine-tuning"
+      - "finetuning"
+      - "RLVR"
+      - "test-time compute"
+      - "reasoning model"
+      - "o1"
+      - "deepseek"
+      - "Llama"
+      - "Mistral"
+      - "Gemini"
+      - "Claude"
+      - "GPT-4"
+
+  # ── Agents & Planning ─────────────────────────────────────────────────────
+  - name: "Agents & Planning"
+    tag: "agents"
+    weight: 9
+    enabled: true
+    keywords:
+      - "agent"
+      - "multi-agent"
+      - "tool use"
+      - "tool calling"
+      - "function calling"
+      - "autonomous"
+      - "agentic"
+      - "planning"
+      - "task planning"
+      - "reasoning"
+      - "chain-of-action"
+      - "ReAct"
+      - "self-play"
+      - "self-improvement"
+      - "self-reflection"
+      - "workflow"
+      - "orchestration"
+
+  # ── Retrieval-Augmented Generation ────────────────────────────────────────
+  - name: "RAG & Knowledge"
+    tag: "rag"
+    weight: 8
+    enabled: true
+    keywords:
+      - "retrieval-augmented generation"
+      - "RAG"
+      - "retrieval augmented"
+      - "knowledge retrieval"
+      - "vector database"
+      - "embedding retrieval"
+      - "dense retrieval"
+      - "knowledge base"
+      - "knowledge graph"
+      - "grounding"
+      - "hallucination"
+      - "factuality"
+      - "long context"
+      - "context window"
+
+  # ── Multimodal ────────────────────────────────────────────────────────────
+  - name: "Multimodal"
+    tag: "multimodal"
+    weight: 8
+    enabled: true
+    keywords:
+      - "multimodal"
+      - "vision-language"
+      - "vision language model"
+      - "VLM"
+      - "image-text"
+      - "text-to-image"
+      - "image captioning"
+      - "visual question answering"
+      - "VQA"
+      - "video understanding"
+      - "video-language"
+      - "audio-language"
+      - "speech-language"
+
+  # ── Efficient ML ──────────────────────────────────────────────────────────
+  - name: "Efficient ML"
+    tag: "efficient"
+    weight: 7
+    enabled: true
+    keywords:
+      - "efficient"
+      - "efficiency"
+      - "quantization"
+      - "pruning"
+      - "distillation"
+      - "knowledge distillation"
+      - "compression"
+      - "low-rank"
+      - "LoRA"
+      - "adapter"
+      - "parameter-efficient"
+      - "PEFT"
+      - "sparse"
+      - "sparsity"
+      - "MoE"
+      - "mixture of experts"
+      - "speculative decoding"
+      - "inference acceleration"
+      - "hardware-aware"
+
+  # ── Reinforcement Learning ────────────────────────────────────────────────
+  - name: "Reinforcement Learning"
+    tag: "rl"
+    weight: 7
+    enabled: true
+    keywords:
+      - "reinforcement learning"
+      - "deep reinforcement learning"
+      - "reward"
+      - "reward model"
+      - "reward shaping"
+      - "policy gradient"
+      - "PPO"
+      - "actor-critic"
+      - "Q-learning"
+      - "model-based RL"
+      - "offline RL"
+      - "offline reinforcement learning"
+      - "imitation learning"
+      - "inverse reinforcement learning"
+      - "exploration"
+      - "multi-task RL"
+      - "GRPO"
+
+  # ── Diffusion Models ──────────────────────────────────────────────────────
+  - name: "Diffusion Models"
+    tag: "diffusion"
+    weight: 7
+    enabled: true
+    keywords:
+      - "diffusion model"
+      - "diffusion process"
+      - "score matching"
+      - "denoising"
+      - "DDPM"
+      - "DDIM"
+      - "flow matching"
+      - "rectified flow"
+      - "stable diffusion"
+      - "latent diffusion"
+      - "image generation"
+      - "text-to-image"
+      - "video generation"
+      - "generative model"
+
+  # ── Alignment & Safety ────────────────────────────────────────────────────
+  - name: "Alignment & Safety"
+    tag: "alignment"
+    weight: 8
+    enabled: true
+    keywords:
+      - "alignment"
+      - "AI safety"
+      - "safety"
+      - "harmlessness"
+      - "helpfulness"
+      - "honesty"
+      - "red teaming"
+      - "jailbreak"
+      - "bias"
+      - "fairness"
+      - "toxicity"
+      - "constitutional AI"
+      - "value alignment"
+      - "preference learning"
+      - "human feedback"
+      - "oversight"
+      - "interpretability"
+      - "mechanistic interpretability"
+      - "explainability"
+
+  # ── Graph & Structured Data ───────────────────────────────────────────────
+  - name: "Graph & Structured"
+    tag: "graph"
+    weight: 6
+    enabled: true
+    keywords:
+      - "graph neural network"
+      - "GNN"
+      - "graph transformer"
+      - "knowledge graph"
+      - "relational"
+      - "structured data"
+      - "tabular"
+      - "molecular graph"
+      - "scene graph"
+
+  # ── Robotics & Embodied AI ────────────────────────────────────────────────
+  - name: "Robotics & Embodied AI"
+    tag: "robotics"
+    weight: 6
+    enabled: true
+    keywords:
+      - "robot"
+      - "robotics"
+      - "embodied"
+      - "manipulation"
+      - "navigation"
+      - "locomotion"
+      - "sim-to-real"
+      - "sim2real"
+      - "dexterous"
+      - "grasping"
+      - "world model"
+
+  # ── Evaluation & Benchmark ────────────────────────────────────────────────
+  - name: "Evaluation & Benchmark"
+    tag: "eval"
+    weight: 5
+    enabled: true
+    keywords:
+      - "benchmark"
+      - "evaluation"
+      - "leaderboard"
+      - "metric"
+      - "MMLU"
+      - "HumanEval"
+      - "GSM8K"
+      - "BIG-Bench"
+      - "HELM"
+
+  # ── 一時停止中のトピック例 ──────────────────────────────────────────────────
+  - name: "Quantum Computing"
+    tag: "quantum"
+    weight: 6
+    enabled: false
+    keywords:
+      - "quantum circuit"
+      - "qubit"
+      - "quantum machine learning"
+      - "variational quantum"
+      - "quantum advantage"
