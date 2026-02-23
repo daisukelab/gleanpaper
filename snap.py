@@ -16,6 +16,7 @@ Usage:
   python snap.py <URL> --top 3                        # use top-3 auto tags (default: 5)
   python snap.py <URL> --dry-run                      # show tags only, no API call
   python snap.py <URL> --force                        # re-summarize if digest exists
+  python snap.py <URL> --skip-pdf                     # abstract only, skip PDF download
 
 Output:
   digest/YYYY-MM/{source}_{id}.md  (same format as Stage 2)
@@ -24,11 +25,15 @@ Requires:
   ANTHROPIC_API_KEY environment variable (or .env file)
 """
 
+from __future__ import annotations
+
 import argparse
+import base64
 import datetime
 import os
 import re
 import sys
+import urllib.request
 from pathlib import Path
 
 import anthropic
@@ -325,7 +330,7 @@ def score_paper(title: str, abstract: str, categories: list, config: dict) -> tu
     abstract_lower = abstract.replace("\n", " ").lower()
 
     for excl in config.get("exclude_keywords", []):
-        if re.search(r"\b" + re.escape(excl.lower()) + r"\b",
+        if re.search(r"\b" + re.escape(excl.lower()) + r"(?:es|s)?\b",
                      f"{title_lower} {abstract_lower}"):
             return 0.0, []
 
@@ -351,7 +356,7 @@ def score_paper(title: str, abstract: str, categories: list, config: dict) -> tu
         matched_kw = []
 
         for kw in topic.get("keywords", []):
-            pat = re.compile(r"\b" + re.escape(kw.lower()) + r"\b", re.IGNORECASE)
+            pat = re.compile(r"\b" + re.escape(kw.lower()) + r"(?:es|s)?\b", re.IGNORECASE)
             title_hits = len(pat.findall(title_lower))
             abstract_hits = len(pat.findall(abstract_lower))
             if title_hits or abstract_hits:
@@ -419,6 +424,38 @@ PROMPT_TEMPLATE = """\
 ### 6. 次に読むべき論文は？
 """
 
+PROMPT_TEMPLATE_FULLPDF = """\
+添付の論文PDFを、指定された6項目でまとめてください。
+
+## 注意事項
+- この論文に書いてある内容のみを記述してください。論文に記載のない情報を類推・推測して付け加えることは厳禁です。
+- 各項目は、できるだけ1行で簡潔に記述してください。
+- 重要な点が複数ある場合は、それぞれ1行で列挙してください。
+- その項目で利用・言及された既存モデル・データセット・手法は、関連する行の直後に「  - 名称」の形式で箇条書きで記載してください。
+- 情報が論文に記載されていない場合は「（論文に記載なし）」と記してください。
+
+## 論文情報
+タイトル: {title}
+著者: {authors}
+関連トピック: {tags}
+
+---
+
+日本語で以下の形式で出力してください（見出し行はそのままコピーして使用）：
+
+### 1. どんなもの？
+
+### 2. 先行研究と比べてどこがすごい？
+
+### 3. 技術や手法の肝はどこ？
+
+### 4. どうやって有効だと検証した？
+
+### 5. 議論はある？
+
+### 6. 次に読むべき論文は？
+"""
+
 
 def build_prompt(paper: dict, tags: list) -> str:
     return PROMPT_TEMPLATE.format(
@@ -429,7 +466,54 @@ def build_prompt(paper: dict, tags: list) -> str:
     )
 
 
-def summarize(paper: dict, tags: list, cfg: dict, client: anthropic.Anthropic) -> str:
+def build_prompt_fullpdf(paper: dict, tags: list) -> str:
+    return PROMPT_TEMPLATE_FULLPDF.format(
+        title=paper["title"],
+        authors=", ".join(paper["authors"]),
+        tags=", ".join(tags),
+    )
+
+
+def download_pdf(url: str, timeout: int = 30) -> bytes | None:
+    """Download PDF from URL. Returns bytes or None on failure."""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "gleampaper/1.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read()
+    except Exception as e:
+        print(f"       [warn] PDF download failed: {e}")
+        return None
+
+
+def summarize(paper: dict, tags: list, cfg: dict, client: anthropic.Anthropic,
+              use_full_pdf: bool = True) -> str:
+    if use_full_pdf and paper.get("pdf_url"):
+        pdf_bytes = download_pdf(paper["pdf_url"])
+        if pdf_bytes:
+            prompt_text = build_prompt_fullpdf(paper, tags)
+            message = client.messages.create(
+                model=cfg["model"],
+                max_tokens=cfg["max_tokens"],
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "document",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "application/pdf",
+                                "data": base64.standard_b64encode(pdf_bytes).decode("utf-8"),
+                            },
+                        },
+                        {"type": "text", "text": prompt_text},
+                    ],
+                }],
+            )
+            return message.content[0].text.strip()
+        else:
+            print("       [warn] Falling back to abstract-only.")
+
+    # abstract-only (default or fallback)
     prompt = build_prompt(paper, tags)
     message = client.messages.create(
         model=cfg["model"],
@@ -437,6 +521,27 @@ def summarize(paper: dict, tags: list, cfg: dict, client: anthropic.Anthropic) -
         messages=[{"role": "user", "content": prompt}],
     )
     return message.content[0].text.strip()
+
+
+# ── Citation count ────────────────────────────────────────────────────────────
+
+def get_citation_count(title: str) -> int | None:
+    """Fetch citation count from Google Scholar via scholarly.
+
+    Returns the citation count as an integer, or None on failure.
+    Failure is silently logged (not a fatal error).
+    """
+    try:
+        from scholarly import scholarly as _scholarly
+        results = _scholarly.search_pubs(title)
+        pub = next(results, None)
+        if pub:
+            return pub.get("num_citations")
+    except ImportError:
+        print("       [warn] scholarly not installed: pip install scholarly")
+    except Exception as e:
+        print(f"       [warn] Citation count unavailable: {e}")
+    return None
 
 
 # ── Write digest ──────────────────────────────────────────────────────────────
@@ -455,7 +560,13 @@ def digest_filename(paper: dict) -> str:
     return f"{paper['source']}_{paper['source_id']}_{slug}.md"
 
 
-def write_digest(paper: dict, tags: list, summary: str, gleaned_date: datetime.date) -> Path:
+def write_digest(
+    paper: dict,
+    tags: list,
+    summary: str,
+    gleaned_date: datetime.date,
+    citation_count: int | None = None,
+) -> Path:
     month_dir = DIGEST_DIR / gleaned_date.strftime("%Y-%m")
     month_dir.mkdir(parents=True, exist_ok=True)
 
@@ -466,6 +577,12 @@ def write_digest(paper: dict, tags: list, summary: str, gleaned_date: datetime.d
     tags_yaml = "\n".join(f"  - {t}" for t in tags)
     tags_inline = " ".join(f"`{t}`" for t in tags)
     pdf_line = f"**PDF**: {paper['pdf_url']}  " if paper.get("pdf_url") else ""
+    citation_yaml = str(citation_count) if citation_count is not None else "null"
+    citation_line = (
+        f"**Citations**: {citation_count}  "
+        if citation_count is not None
+        else "**Citations**: 取得不可  "
+    )
 
     content = f"""\
 ---
@@ -477,6 +594,7 @@ authors:
 {authors_yaml}
 date_published: "{paper.get('date_published', str(gleaned_date))}"
 date_gleaned: "{gleaned_date}"
+citation_count: {citation_yaml}
 tags:
 {tags_yaml}
 score: {paper['score']}
@@ -486,6 +604,7 @@ score: {paper['score']}
 
 **Authors**: {', '.join(paper['authors'])}
 **Published**: {paper.get('date_published', str(gleaned_date))}
+{citation_line}
 **Tags**: {tags_inline}
 **URL**: {paper['url']}
 {pdf_line}
@@ -531,6 +650,10 @@ def main():
         "--force", action="store_true",
         help="Re-summarize even if a digest file already exists",
     )
+    parser.add_argument(
+        "--skip-pdf", action="store_true",
+        help="Use abstract only, skip PDF download (faster, fewer tokens)",
+    )
     args = parser.parse_args()
 
     interests = load_interests()
@@ -540,7 +663,7 @@ def main():
     print("─" * 52)
 
     # ── Step 1: Fetch metadata ────────────────────────────────────────────────
-    print(f"\n[1/3] Fetching paper metadata...")
+    print(f"\n[1/4] Fetching paper metadata...")
     print(f"      URL: {args.url}")
     try:
         paper = fetch_paper(args.url)
@@ -564,9 +687,9 @@ def main():
         paper["score"] = score_paper(
             paper["title"], paper["abstract"], paper.get("categories", []), interests
         )[0]
-        print(f"\n[2/3] Tags (manual): {', '.join(tags)}")
+        print(f"\n[2/4] Tags (manual): {', '.join(tags)}")
     else:
-        print(f"\n[2/3] Auto-tagging from interests.yaml (top {args.top})...")
+        print(f"\n[2/4] Auto-tagging from interests.yaml (top {args.top})...")
         tags = auto_tag(paper, interests, top_n=args.top)
         if tags:
             print(f"      Tags  : {', '.join(tags)}")
@@ -587,7 +710,15 @@ def main():
         print("       Use --force to re-summarize.")
         return
 
-    # ── Step 3: Summarize ─────────────────────────────────────────────────────
+    # ── Step 3: Citation count ────────────────────────────────────────────────
+    print(f"\n[3/4] Fetching citation count from Google Scholar...")
+    citation_count = get_citation_count(paper["title"])
+    if citation_count is not None:
+        print(f"      Citations: {citation_count}")
+    else:
+        print("      Citations: unavailable")
+
+    # ── Step 4: Summarize ─────────────────────────────────────────────────────
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         sys.exit(
@@ -598,10 +729,10 @@ def main():
 
     client = anthropic.Anthropic(api_key=api_key)
 
-    print(f"\n[3/3] Summarizing via {sum_cfg['model']}...")
+    print(f"\n[4/4] Summarizing via {sum_cfg['model']} (full-pdf: {not args.skip_pdf})...")
     try:
-        summary = summarize(paper, tags, sum_cfg, client)
-        path = write_digest(paper, tags, summary, today)
+        summary = summarize(paper, tags, sum_cfg, client, use_full_pdf=not args.skip_pdf)
+        path = write_digest(paper, tags, summary, today, citation_count=citation_count)
     except Exception as e:
         sys.exit(f"[error] {e}")
 

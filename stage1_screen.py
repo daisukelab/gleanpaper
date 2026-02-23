@@ -9,18 +9,26 @@ Outputs:
   review/YYYY-MM-DD.md       human review file (write tags to select papers for Stage 2)
 
 Usage:
-  python stage1_screen.py                  # today
-  python stage1_screen.py --date 2026-02-18
-  python stage1_screen.py --rescreen       # re-screen today, preserving existing tags
-  python stage1_screen.py --force          # re-screen today, overwriting everything
+  python stage1_screen.py                  # インクリメンタル（前回取得日の翌日〜今日）
+  python stage1_screen.py 2026-02-18       # 単日モード（指定日のみ取得）
+  python stage1_screen.py -re              # 最新レビューを再スクリーニング（タグ保持）
+  python stage1_screen.py -re 2026-02-18   # 日付指定 + re-screen
+  python stage1_screen.py --force          # re-screen、既存ファイルを上書き
   python stage1_screen.py --check          # show config statistics
+
+【インクリメンタルモードについて】
+  引数なしで実行すると screened/ および archive/screened/ の最終日付を検出し、
+  その翌日〜UTC 今日の範囲を一括 fetch する。
+  結果を result.published.date() で日付ごとに分割してファイルを生成するため、
+  arXiv 検索インデックスのラグや週末の空白日を自動スキップできる。
 """
 
 import argparse
 import json
 import re
 import sys
-from datetime import date, timedelta
+import time
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import arxiv
@@ -32,6 +40,7 @@ BASE_DIR = Path(__file__).parent
 CONFIG_PATH = BASE_DIR / "config" / "interests.yaml"
 SCREENED_DIR = BASE_DIR / "screened"
 REVIEW_DIR = BASE_DIR / "review"
+ARCHIVE_DIR = BASE_DIR / "archive"
 
 # Title keyword matches are weighted more heavily than abstract matches
 TITLE_WEIGHT_MULTIPLIER = 2
@@ -64,7 +73,7 @@ def score_paper(title: str, abstract: str, categories: list, config: dict) -> tu
     # Exclude keywords: skip paper entirely if any match
     for excl in config.get("exclude_keywords", []):
         full_text = f"{title_lower} {abstract_lower}"
-        if re.search(r"\b" + re.escape(excl.lower()) + r"\b", full_text):
+        if re.search(r"\b" + re.escape(excl.lower()) + r"(?:es|s)?\b", full_text):
             return 0.0, []
 
     # Category bonus
@@ -91,7 +100,7 @@ def score_paper(title: str, abstract: str, categories: list, config: dict) -> tu
         matched_kw = []
 
         for kw in topic.get("keywords", []):
-            pat = re.compile(r"\b" + re.escape(kw.lower()) + r"\b", re.IGNORECASE)
+            pat = re.compile(r"\b" + re.escape(kw.lower()) + r"(?:es|s)?\b", re.IGNORECASE)
             title_hits = len(pat.findall(title_lower))
             abstract_hits = len(pat.findall(abstract_lower))
 
@@ -118,6 +127,16 @@ def score_paper(title: str, abstract: str, categories: list, config: dict) -> tu
 
 # ── Fetch from arXiv ──────────────────────────────────────────────────────────
 
+def default_target_date() -> date:
+    """Return today in UTC as the default arXiv target date.
+
+    arXiv uses UTC for submittedDate. date.today() returns the local (JST)
+    date, which can be ahead of UTC and cause 0 results. Using UTC now
+    always returns the correct arXiv date.
+    """
+    return datetime.now(timezone.utc).date()
+
+
 def effective_days_back(target_date: date, configured_days_back: int) -> int:
     """Extend days_back automatically on Mondays to cover the weekend gap."""
     if target_date.weekday() == 0:  # Monday
@@ -125,29 +144,37 @@ def effective_days_back(target_date: date, configured_days_back: int) -> int:
     return configured_days_back
 
 
-def fetch_arxiv(config: dict, target_date: date) -> tuple:
+def find_last_screened_date() -> date | None:
+    """Return the most recent date found in screened/ or archive/screened/."""
+    dates = []
+    for d in [SCREENED_DIR, ARCHIVE_DIR / "screened"]:
+        for p in d.glob("????-??-??.json"):
+            try:
+                dates.append(date.fromisoformat(p.stem))
+            except ValueError:
+                pass
+    return max(dates) if dates else None
+
+
+def fetch_arxiv(config: dict, start_date: date, end_date: date) -> tuple:
     """Returns (list[arxiv.Result], fetched_count)."""
     fetch_cfg = config.get("fetch", {})
     primary = fetch_cfg.get("categories", {}).get("primary", [])
     secondary = fetch_cfg.get("categories", {}).get("secondary", [])
     all_cats = primary + secondary
     max_results = fetch_cfg.get("max_results", 500)
-    days_back = effective_days_back(
-        target_date, fetch_cfg.get("days_back", 1)
-    )
 
-    start_date = target_date - timedelta(days=days_back - 1)
     date_from = start_date.strftime("%Y%m%d") + "000000"
-    date_to = target_date.strftime("%Y%m%d") + "235959"
+    date_to = end_date.strftime("%Y%m%d") + "235959"
 
     cat_query = " OR ".join(f"cat:{c}" for c in all_cats)
     query = f"({cat_query}) AND submittedDate:[{date_from} TO {date_to}]"
 
     print(f"      Categories : {', '.join(all_cats)}")
-    print(f"      Date range : {start_date} – {target_date}")
+    print(f"      Date range : {start_date} – {end_date}")
     print(f"      Max results: {max_results}")
 
-    client = arxiv.Client(num_retries=3, delay_seconds=3)
+    client = arxiv.Client(num_retries=3, delay_seconds=5)
     search = arxiv.Search(
         query=query,
         max_results=max_results,
@@ -155,8 +182,17 @@ def fetch_arxiv(config: dict, target_date: date) -> tuple:
         sort_order=arxiv.SortOrder.Descending,
     )
 
-    results = list(client.results(search))
-    return results, len(results)
+    for attempt in range(4):
+        try:
+            results = list(client.results(search))
+            return results, len(results)
+        except arxiv.HTTPError as e:
+            if e.status == 429 and attempt < 3:
+                wait = 30 * (attempt + 1)
+                print(f"      [rate limit] 429 received. {wait}秒後にリトライ... ({attempt + 1}/3)")
+                time.sleep(wait)
+            else:
+                raise
 
 
 # ── Convert arXiv result to dict ──────────────────────────────────────────────
@@ -183,6 +219,7 @@ def result_to_dict(result: arxiv.Result, score: float, matched_topics: list) -> 
         "categories": list(result.categories),
         "url": url,
         "pdf_url": pdf_url,
+        "date_published": result.published.strftime("%Y-%m-%d"),
         "score": score,
         "matched_topics": matched_topics,
     }
@@ -205,6 +242,33 @@ def screen_papers(raw: list, config: dict) -> list:
 
     scored.sort(key=lambda p: p["score"], reverse=True)
     return scored[:top_n]
+
+
+def screen_and_split(raw: list, config: dict) -> dict:
+    """
+    Screen papers and group by published date (for incremental mode).
+    Returns {date: [paper_dicts]}, each date's list sorted by score, top_n applied.
+    """
+    screening = config.get("screening", {})
+    min_score = screening.get("min_score", 5)
+    top_n = screening.get("top_n", 50)
+
+    by_date: dict = {}
+    for r in raw:
+        score, matched = score_paper(
+            r.title, r.summary, list(r.categories), config
+        )
+        if score >= min_score and matched:
+            pub_date = r.published.date()
+            by_date.setdefault(pub_date, []).append(
+                result_to_dict(r, score, matched)
+            )
+
+    for d in by_date:
+        by_date[d].sort(key=lambda p: p["score"], reverse=True)
+        by_date[d] = by_date[d][:top_n]
+
+    return by_date
 
 
 # ── Output helpers ────────────────────────────────────────────────────────────
@@ -337,7 +401,7 @@ def save_review_md(
 
             # Restore existing tag or leave blank
             restored_tag = existing_tags.get(paper["source_id"], "")
-            tag_line = f"tags: {restored_tag}" if restored_tag else "tags:"
+            tag_line = f"tags: {restored_tag}" if restored_tag else "tags: "
             tag_marker = "  ← restored" if restored_tag else ""
 
             lines += [
@@ -403,9 +467,10 @@ def main():
         description="gleampaper Stage 1 — fetch and screen arXiv papers"
     )
     parser.add_argument(
-        "--date",
+        "date",
+        nargs="?",
         metavar="YYYY-MM-DD",
-        help="Target date (default: today)",
+        help="Target date for single-day mode (default: incremental mode)",
     )
     parser.add_argument(
         "--check",
@@ -413,7 +478,7 @@ def main():
         help="Show config statistics and exit",
     )
     parser.add_argument(
-        "--rescreen",
+        "-re", "--rescreen",
         action="store_true",
         help="Re-run screening for an existing date, preserving tags already entered",
     )
@@ -430,70 +495,142 @@ def main():
         cmd_check(config)
         return
 
-    if args.date:
-        try:
-            target_date = date.fromisoformat(args.date)
-        except ValueError:
-            sys.exit(f"[error] Invalid date: {args.date}. Use YYYY-MM-DD.")
-    else:
-        target_date = date.today()
-
-    review_path = REVIEW_DIR / f"{target_date}.md"
-    json_path = SCREENED_DIR / f"{target_date}.json"
-
-    # Guard: warn if files already exist and neither --rescreen nor --force given
-    if (review_path.exists() or json_path.exists()) and not args.rescreen and not args.force:
-        print(f"[warn] Output files for {target_date} already exist:")
-        if json_path.exists():
-            print(f"       {json_path}")
-        if review_path.exists():
-            print(f"       {review_path}")
-        print(f"\n  Use --rescreen to re-run and preserve existing tags.")
-        print(f"  Use --force    to overwrite everything.")
-        sys.exit(0)
-
-    # Load existing tags before overwriting (--rescreen only)
-    existing_tags = {}
-    if args.rescreen and review_path.exists():
-        existing_tags = parse_existing_tags(review_path)
-        tagged_count = len(existing_tags)
-        if tagged_count:
-            print(f"[info] Found {tagged_count} tagged paper(s) — will preserve.")
+    # ── Single-date mode (date given, or --rescreen/--force without date) ─────
+    if args.date or args.rescreen or args.force:
+        if args.date:
+            try:
+                target_date = date.fromisoformat(args.date)
+            except ValueError:
+                sys.exit(f"[error] Invalid date: {args.date}. Use YYYY-MM-DD.")
         else:
-            print(f"[info] No tags found in existing review file.")
+            # --rescreen or --force without date: use latest review file
+            review_files = sorted(REVIEW_DIR.glob("????-??-??.md"), reverse=True)
+            if not review_files:
+                sys.exit("[error] No review files found. Please specify a date.")
+            target_date = date.fromisoformat(review_files[0].stem)
+            print(f"[info] 日付省略のため最新レビューファイルを使用: {target_date}")
 
-    print(f"gleampaper Stage 1 — {target_date}")
+        review_path = REVIEW_DIR / f"{target_date}.md"
+        json_path = SCREENED_DIR / f"{target_date}.json"
+
+        # Guard: warn if files already exist and neither --rescreen nor --force given
+        if (review_path.exists() or json_path.exists()) and not args.rescreen and not args.force:
+            print(f"[warn] Output files for {target_date} already exist:")
+            if json_path.exists():
+                print(f"       {json_path}")
+            if review_path.exists():
+                print(f"       {review_path}")
+            print(f"\n  Use --rescreen to re-run and preserve existing tags.")
+            print(f"  Use --force    to overwrite everything.")
+            sys.exit(0)
+
+        # Load existing tags before overwriting (--rescreen only)
+        existing_tags = {}
+        if args.rescreen and review_path.exists():
+            existing_tags = parse_existing_tags(review_path)
+            tagged_count = len(existing_tags)
+            if tagged_count:
+                print(f"[info] Found {tagged_count} tagged paper(s) — will preserve.")
+            else:
+                print(f"[info] No tags found in existing review file.")
+
+        print(f"gleampaper Stage 1 — {target_date}")
+        print("─" * 52)
+
+        fetch_cfg = config.get("fetch", {})
+        days_back = effective_days_back(target_date, fetch_cfg.get("days_back", 1))
+        start_date = target_date - timedelta(days=days_back - 1)
+
+        print("\n[1/4] Fetching papers from arXiv...")
+        raw, fetched = fetch_arxiv(config, start_date, target_date)
+        print(f"      → {fetched} papers fetched")
+
+        print("\n[2/4] Screening...")
+        papers = screen_papers(raw, config)
+        min_score = config.get("screening", {}).get("min_score", 5)
+        print(f"      → {len(papers)} papers passed (min_score={min_score})")
+
+        print("\n[3/4] Saving screened JSON...")
+        json_path = save_screened_json(papers, target_date, fetched)
+        print(f"      → {json_path}")
+
+        print("\n[4/4] Generating review Markdown...")
+        review_path = save_review_md(papers, target_date, fetched, config, existing_tags)
+        print(f"      → {review_path}")
+        if args.rescreen and existing_tags:
+            restored = sum(1 for p in papers if p["source_id"] in existing_tags)
+            added = len(papers) - restored
+            print(f"      タグ保持: {restored}件 / 新規追加: {added}件")
+
+        if existing_tags:
+            restored = sum(1 for p in papers if p["source_id"] in existing_tags)
+            lost = len(existing_tags) - restored
+            print(f"      → tags restored: {restored}件", end="")
+            if lost:
+                print(f" / lost (no longer in results): {lost}件", end="")
+            print()
+
+        print("\n" + "─" * 52)
+        print("Done. Open the review file and add tags:")
+        print(f"  code {review_path}")
+        print("Then run Stage 2:")
+        print("  python stage2_summarize.py")
+        return
+
+    # ── Incremental mode (no args) ─────────────────────────────────────────────
+    last_date = find_last_screened_date()
+    if last_date is None:
+        sys.exit(
+            "[error] スクリーニング済みファイルが見つかりません。\n"
+            "        初回は日付を指定して実行してください:\n"
+            "          python stage1_screen.py YYYY-MM-DD"
+        )
+
+    start_date = last_date + timedelta(days=1)
+    end_date = datetime.now(timezone.utc).date()
+
+    if start_date > end_date:
+        print(f"[info] 最終取得日: {last_date} — すでに最新です。")
+        return
+
+    print(f"gleampaper Stage 1 — incremental ({start_date} – {end_date})")
     print("─" * 52)
+    print(f"[info] 最終取得日: {last_date}")
 
-    print("\n[1/4] Fetching papers from arXiv...")
-    raw, fetched = fetch_arxiv(config, target_date)
+    print("\n[1/3] Fetching papers from arXiv...")
+    raw, fetched = fetch_arxiv(config, start_date, end_date)
     print(f"      → {fetched} papers fetched")
 
-    print("\n[2/4] Screening...")
-    papers = screen_papers(raw, config)
+    print("\n[2/3] Screening and splitting by published date...")
+    by_date = screen_and_split(raw, config)
     min_score = config.get("screening", {}).get("min_score", 5)
-    print(f"      → {len(papers)} papers passed (min_score={min_score})")
 
-    print("\n[3/4] Saving screened JSON...")
-    json_path = save_screened_json(papers, target_date, fetched)
-    print(f"      → {json_path}")
+    created = []
+    for d in sorted(by_date.keys()):
+        papers = by_date[d]
+        print(f"      {d}: {len(papers)}件 passed")
+        save_screened_json(papers, d, fetched)
+        save_review_md(papers, d, fetched, config)
+        created.append(d)
 
-    print("\n[4/4] Generating review Markdown...")
-    review_path = save_review_md(papers, target_date, fetched, config, existing_tags)
-    print(f"      → {review_path}")
+    if not created:
+        print("      → 新規ファイルなし")
+        if fetched == 0:
+            print(
+                f"      (arXiv インデックスが {start_date} 以降の論文を"
+                f"まだ収録していない可能性があります)"
+            )
+        print("\n" + "─" * 52)
+        return
 
-    # Summary of tag preservation
-    if existing_tags:
-        restored = sum(1 for p in papers if p["source_id"] in existing_tags)
-        lost = len(existing_tags) - restored
-        print(f"      → tags restored: {restored}件", end="")
-        if lost:
-            print(f" / lost (no longer in results): {lost}件", end="")
-        print()
+    print(f"\n[3/3] {len(created)}日分のファイルを生成しました:")
+    for d in created:
+        print(f"      review/{d}.md")
 
     print("\n" + "─" * 52)
-    print("Done. Open the review file and add tags:")
-    print(f"  code {review_path}")
+    print("Done. Open the review file(s) and add tags:")
+    for d in created:
+        print(f"  code review/{d}.md")
     print("Then run Stage 2:")
     print("  python stage2_summarize.py")
 

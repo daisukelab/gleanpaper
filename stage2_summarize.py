@@ -18,12 +18,16 @@ Requires:
   ANTHROPIC_API_KEY environment variable (or .env file)
 """
 
+from __future__ import annotations
+
 import argparse
+import base64
 import json
 import os
 import re
 import sys
 import time
+import urllib.request
 from datetime import date
 from pathlib import Path
 
@@ -43,6 +47,7 @@ SUMMARIZE_CONFIG_PATH = BASE_DIR / "config" / "summarize.yaml"
 SCREENED_DIR = BASE_DIR / "screened"
 REVIEW_DIR = BASE_DIR / "review"
 DIGEST_DIR = BASE_DIR / "digest"
+ARCHIVE_DIR = BASE_DIR / "archive"
 
 DEFAULT_CONFIG = {
     "model": "claude-sonnet-4-6",
@@ -95,10 +100,12 @@ def parse_tagged_papers(review_path: Path) -> list:
 # ── Load screened JSON ────────────────────────────────────────────────────────
 
 def load_screened(target_date: date) -> dict:
-    """Returns {source_id: paper_dict}."""
+    """Returns {source_id: paper_dict}. Checks archive/ if not found in screened/."""
     path = SCREENED_DIR / f"{target_date}.json"
     if not path.exists():
-        sys.exit(f"[error] Screened file not found: {path}")
+        path = ARCHIVE_DIR / "screened" / f"{target_date}.json"
+    if not path.exists():
+        sys.exit(f"[error] Screened file not found: {SCREENED_DIR / f'{target_date}.json'}")
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
     return {p["source_id"]: p for p in data["papers"]}
@@ -141,6 +148,38 @@ PROMPT_TEMPLATE = """\
 ### 6. 次に読むべき論文は？
 """
 
+PROMPT_TEMPLATE_FULLPDF = """\
+添付の論文PDFを、指定された6項目でまとめてください。
+
+## 注意事項
+- この論文に書いてある内容のみを記述してください。論文に記載のない情報を類推・推測して付け加えることは厳禁です。
+- 各項目は、できるだけ1行で簡潔に記述してください。
+- 重要な点が複数ある場合は、それぞれ1行で列挙してください。
+- その項目で利用・言及された既存モデル・データセット・手法は、関連する行の直後に「  - 名称」の形式で箇条書きで記載してください。
+- 情報が論文に記載されていない場合は「（論文に記載なし）」と記してください。
+
+## 論文情報
+タイトル: {title}
+著者: {authors}
+関連トピック: {tags}
+
+---
+
+日本語で以下の形式で出力してください（見出し行はそのままコピーして使用）：
+
+### 1. どんなもの？
+
+### 2. 先行研究と比べてどこがすごい？
+
+### 3. 技術や手法の肝はどこ？
+
+### 4. どうやって有効だと検証した？
+
+### 5. 議論はある？
+
+### 6. 次に読むべき論文は？
+"""
+
 
 def build_prompt(paper: dict, tags: list) -> str:
     return PROMPT_TEMPLATE.format(
@@ -151,9 +190,58 @@ def build_prompt(paper: dict, tags: list) -> str:
     )
 
 
+def build_prompt_fullpdf(paper: dict, tags: list) -> str:
+    return PROMPT_TEMPLATE_FULLPDF.format(
+        title=paper["title"],
+        authors=", ".join(paper["authors"]),
+        tags=", ".join(tags),
+    )
+
+
+# ── PDF download ──────────────────────────────────────────────────────────────
+
+def download_pdf(url: str, timeout: int = 30) -> bytes | None:
+    """Download PDF from URL. Returns bytes or None on failure."""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "gleampaper/1.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read()
+    except Exception as e:
+        print(f"       [warn] PDF download failed: {e}")
+        return None
+
+
 # ── Summarize via Claude API ──────────────────────────────────────────────────
 
-def summarize(paper: dict, tags: list, cfg: dict, client: anthropic.Anthropic) -> str:
+def summarize(paper: dict, tags: list, cfg: dict, client: anthropic.Anthropic,
+              use_full_pdf: bool = False) -> str:
+    if use_full_pdf and paper.get("pdf_url"):
+        pdf_bytes = download_pdf(paper["pdf_url"])
+        if pdf_bytes:
+            prompt_text = build_prompt_fullpdf(paper, tags)
+            message = client.messages.create(
+                model=cfg["model"],
+                max_tokens=cfg["max_tokens"],
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "document",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "application/pdf",
+                                "data": base64.standard_b64encode(pdf_bytes).decode("utf-8"),
+                            },
+                        },
+                        {"type": "text", "text": prompt_text},
+                    ],
+                }],
+            )
+            return message.content[0].text.strip()
+        else:
+            print("       [warn] Falling back to abstract-only.")
+
+    # abstract-only (default or fallback)
     prompt = build_prompt(paper, tags)
     message = client.messages.create(
         model=cfg["model"],
@@ -226,6 +314,27 @@ score: {paper['score']}
     return path
 
 
+# ── Archive ───────────────────────────────────────────────────────────────────
+
+def archive_date(target_date: date, review_path: Path) -> None:
+    """Move review/YYYY-MM-DD.md and screened/YYYY-MM-DD.json to archive/."""
+    arch_review_dir = ARCHIVE_DIR / "review"
+    arch_screened_dir = ARCHIVE_DIR / "screened"
+    arch_review_dir.mkdir(parents=True, exist_ok=True)
+    arch_screened_dir.mkdir(parents=True, exist_ok=True)
+
+    if review_path.exists():
+        dest = arch_review_dir / review_path.name
+        review_path.rename(dest)
+        print(f"[archive] review/{review_path.name} → archive/review/")
+
+    screened_path = SCREENED_DIR / f"{target_date}.json"
+    if screened_path.exists():
+        dest = arch_screened_dir / screened_path.name
+        screened_path.rename(dest)
+        print(f"[archive] screened/{screened_path.name} → archive/screened/")
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def find_latest_review() -> Path:
@@ -256,6 +365,14 @@ def main():
     parser.add_argument(
         "--force", action="store_true",
         help="Re-summarize even if digest file already exists",
+    )
+    parser.add_argument(
+        "--skip-pdf", action="store_true",
+        help="Use abstract only, skip PDF download (faster, fewer tokens)",
+    )
+    parser.add_argument(
+        "--no-archive", action="store_true",
+        help="Skip moving review/screened files to archive/ after processing",
     )
     args = parser.parse_args()
 
@@ -300,6 +417,7 @@ def main():
     print(f"\n  Tagged  : {len(candidates)} papers")
     print(f"  Model   : {cfg['model']}")
     print(f"  top_n   : {cfg['top_n']}")
+    print(f"  full-pdf: {not args.skip_pdf}")
     print()
     for t, p in candidates:
         dp = digest_path_for(p, target_date)
@@ -335,7 +453,7 @@ def main():
 
         print(f"[{i}/{len(candidates)}] {paper['title'][:60]}...")
         try:
-            summary = summarize(paper, t["tags"], cfg, client)
+            summary = summarize(paper, t["tags"], cfg, client, use_full_pdf=not args.skip_pdf)
             path = write_digest(paper, t["tags"], summary, target_date)
             saved.append(path)
             print(f"       → {path}")
@@ -349,6 +467,10 @@ def main():
     print(f"Done.  saved: {len(saved)}  skipped: {skipped}")
     if saved:
         print(f"Digest files: digest/{target_date.strftime('%Y-%m')}/")
+
+    if not args.no_archive and candidates:
+        print()
+        archive_date(target_date, review_path)
 
 
 if __name__ == "__main__":

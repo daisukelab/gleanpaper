@@ -1,7 +1,7 @@
 # gleampaper — 仕様書
 
 > 論文スクリーニング＆要約支援ツール
-> 最終更新: 2026-02-19
+> 最終更新: 2026-02-24（インクリメンタルフェッチ・自動アーカイブ対応）
 
 ---
 
@@ -50,22 +50,27 @@ gleampaper/
 │   └── spec.md                    # 本仕様書
 ├── config/
 │   ├── interests.yaml             # 興味リスト・タグ定義（ユーザーが随時編集）
-│   └── summarize.yaml             # Stage 2 LLM 設定（将来実装）
-├── screened/                      # Stage 1 生データ出力
+│   └── summarize.yaml             # Stage 2 LLM 設定
+├── screened/                      # Stage 1 生データ（未処理・レビュー中）
 │   └── YYYY-MM-DD.json
-├── review/                        # 人間レビュー用 Markdown
+├── review/                        # 人間レビュー用 Markdown（未処理・タグ記入中）
 │   └── YYYY-MM-DD.md
+├── archive/                       # Stage 2 処理済みファイルの移動先
+│   ├── screened/
+│   │   └── YYYY-MM-DD.json
+│   └── review/
+│       └── YYYY-MM-DD.md
 ├── digest/                        # Stage 2 要約出力（論文ごとに 1 ファイル）
 │   └── YYYY-MM/
 │       ├── arxiv_2602.12345.md
 │       └── arxiv_2602.23456.md
 ├── stage1_screen.py               # Stage 1 スクリプト
-├── stage2_summarize.py            # Stage 2 スクリプト（将来実装）
+├── stage2_summarize.py            # Stage 2 スクリプト
 ├── requirements.txt
 └── .gitignore
 ```
 
-> `screened/`, `review/`, `digest/` 以下の日次ファイルはローカル保存のみ（`.gitignore` 対象）。
+> `screened/`, `review/`, `archive/`, `digest/` 以下の日次ファイルはローカル保存のみ（`.gitignore` 対象）。
 > プログラム本体とコンフィグテンプレートのみ GitHub で管理する。
 
 ---
@@ -160,15 +165,49 @@ topics:
 | `config/interests.yaml` | 監視カテゴリ・キーワード・タグ・スコア閾値 |
 | arXiv API | 新着論文（平日のみ取得） |
 
-### 処理フロー
+### タイムゾーン
+
+arXiv の `submittedDate` は **UTC 基準**。`date.today()` はローカル（JST）の日付を返すため、
+UTC ではまだ存在しない日付をクエリして 0 件になることがある。
+そのため **デフォルトは `datetime.now(timezone.utc).date()`（UTC 当日）** を使用する。
+
+```
+JST 10:00 (UTC+9) → UTC 01:00 → UTC 当日 = JST 昨日分の論文を正しく取得
+```
+
+明示的に日付を指定したい場合は `--date YYYY-MM-DD` を使用する。
+
+### 動作モード
+
+#### インクリメンタルモード（引数なし・デフォルト）
+
+```
+python stage1_screen.py
+```
+
+1. `screened/` と `archive/screened/` から最終取得日を自動検出
+2. 翌日〜UTC 今日の範囲を一括 fetch（API 呼び出し 1 回）
+3. `result.published.date()` で日付ごとに分割・スクリーニング
+4. 結果のある日付だけファイルを生成（空白日は自動スキップ）
+
+arXiv の検索インデックスラグや週末の空白日を意識せず運用できる。
+
+#### 単日モード（日付指定）
+
+```
+python stage1_screen.py 2026-02-18
+```
+
+指定日（`effective_days_back` で月曜は週末分も含む）を単独取得。
+`--rescreen` / `--force` は単日モードのみ有効。
+
+### 処理フロー（インクリメンタルモード）
 
 1. `interests.yaml` を読み込む
-2. 指定カテゴリの新着論文を arXiv API から取得
-3. 各論文のタイトル＋アブストラクトに対してキーワードマッチング
-4. スコアを計算（後述）
-5. `min_score` 未満を除外、上位 `top_n` 件に絞り込む
-6. `screened/YYYY-MM-DD.json` に生データを保存
-7. `review/YYYY-MM-DD.md` にレビューファイルを生成
+2. 最終取得日を検出し、翌日〜UTC 今日を arXiv API から一括取得
+3. 各論文のタイトル＋アブストラクトに対してキーワードマッチング＆スコア計算
+4. `min_score` 未満を除外し、`result.published.date()` で日付ごとに分類
+5. 結果のある各日付について `screened/YYYY-MM-DD.json` と `review/YYYY-MM-DD.md` を生成
 
 ### スコアリング
 
@@ -302,9 +341,30 @@ tags: llm, mynewtag  ← 独自タグを追加することも可
 ### 処理フロー
 
 1. `review/YYYY-MM-DD.md` から `tags:` が空でない論文を抽出（ID・タグ一覧を取得）
-2. `screened/YYYY-MM-DD.json` から該当論文のフルデータを取得
-3. スコア上位 `top_n` 件を Claude API に送信し要約生成
+2. `screened/YYYY-MM-DD.json`（なければ `archive/screened/` も参照）から該当論文のフルデータを取得
+3. スコア上位 `top_n` 件について PDF をダウンロードし Claude API に送信して要約生成（`--skip-pdf` 時はアブストラクトのみ送信）
 4. 論文ごとに `digest/YYYY-MM/SOURCE_ID.md` を生成
+5. 処理完了後、`review/YYYY-MM-DD.md` と `screened/YYYY-MM-DD.json` を `archive/` に移動（`--no-archive` で無効化）
+
+### PDF 全文モード（デフォルト）
+
+`pdf_url` から論文 PDF をダウンロードし、base64 エンコードして Claude API のドキュメント機能で送信する。
+アブストラクトのみのモードと比べ、参考文献リストや実験詳細など本文の情報を踏まえた要約が得られる。
+
+- PDF ダウンロードに失敗した場合はアブストラクトのみにフォールバック
+- トークン消費が増えるため、コスト・速度が気になる場合は `--skip-pdf` を使用
+- `--skip-pdf` 時は「情報が不十分で答えられない項目は **（アブストラクトからは不明）**」と注記される
+
+### 引用数取得（snap のみ）
+
+`snap.py` は要約前に **Google Scholar** から引用数を自動取得し、digest のフロントマターと
+ヘッダーに記録する（`scholarly` ライブラリ使用）。
+
+- 取得に成功した場合: `citation_count: 42`（整数）
+- 取得に失敗した場合: `citation_count: null`、ヘッダーは「取得不可」と表示
+- `scholarly` がインストールされていない場合は警告のみ（要約処理は継続）
+
+`stage2_summarize.py` はバッチ処理のため引用数取得は行わない（レート制限のリスクを避けるため）。
 
 ### 要約フォーマット（6項目）
 
@@ -339,6 +399,7 @@ authors:
   - "Lee, K."
 date_published: "2026-02-19"
 date_gleaned: "2026-02-19"
+citation_count: 42
 tags:
   - llm
   - agents
@@ -349,6 +410,7 @@ score: 27.0
 
 **Authors**: Smith, J., Lee, K.
 **Published**: 2026-02-19
+**Citations**: 42
 **Tags**: `llm` `agents`
 **URL**: https://arxiv.org/abs/2602.12345
 **PDF**: https://arxiv.org/pdf/2602.12345
@@ -395,21 +457,35 @@ prompting to improve multi-step reasoning...
 ## 実行方法
 
 ```bash
-# Stage 1: 本日分をスクリーニング
+# Stage 1: インクリメンタル（前回取得日の翌日〜今日を自動取得）
 python stage1_screen.py
 
-# 日付を指定して実行
-python stage1_screen.py --date 2026-02-18
+# Stage 1: 日付を指定して単日取得
+python stage1_screen.py 2026-02-18
 
-# 設定確認（キーワード統計・カバレッジ）
+# Stage 1: 設定確認（キーワード統計・カバレッジ）
 python stage1_screen.py --check
 
 # VSCode でレビューファイルを開く
 code review/2026-02-19.md
 
-# Stage 2: タグ付き論文を要約（将来実装）
+# Stage 2: タグ付き論文を要約 → 完了後に archive/ へ自動移動（デフォルト）
 python stage2_summarize.py
-python stage2_summarize.py 2026-02-19    # 日付指定
+
+# Stage 2: アーカイブせず処理のみ（再処理など）
+python stage2_summarize.py --no-archive
+
+# Stage 2: アブストラクトのみ（トークン節約）
+python stage2_summarize.py --skip-pdf
+
+# Stage 2: 日付指定
+python stage2_summarize.py --date 2026-02-18
+
+# snap: URL を指定して1件だけ即時取得・要約（PDF全文モード・デフォルト）
+python snap.py https://arxiv.org/abs/2602.XXXXX
+
+# snap: アブストラクトのみ
+python snap.py https://arxiv.org/abs/2602.XXXXX --skip-pdf
 ```
 
 ---
