@@ -1,13 +1,13 @@
 # gleampaper — 仕様書
 
 > 論文スクリーニング＆要約支援ツール
-> 最終更新: 2026-02-24（インクリメンタルフェッチ・自動アーカイブ対応）
+> 最終更新: 2026-02-24（snap.py 正式化・仕様全面整合）
 
 ---
 
 ## 概要
 
-学術論文プリプリントサーバー（arXiv、将来的に IEEE Xplore 等）から毎日新着論文を取得し、
+学術論文プリプリントサーバー（arXiv・OpenReview・IEEE Xplore）から新着論文を取得し、
 ユーザーが定義した興味リストに基づいてスクリーニングする。
 スクリーニング結果を人間がタグを付けてレビューし、タグ付きの論文を LLM で要約する、
 2ステージ構成のヒューマンインザループ型ツール。
@@ -22,21 +22,22 @@
 ```
 interests.yaml（トピック定義＋タグ定義）
       │
-      ▼
-┌─────────────────────┐
-│   stage1_screen.py  │  ← Stage 1: スクリーニング
-└─────────────────────┘
-      │
-      ├── screened/YYYY-MM-DD.json      （生データ・機械用）
+      ├─────────────────────────────────────────────────────┐
+      ▼                                                     ▼
+┌─────────────────────┐                        ┌─────────────────────┐
+│   stage1_screen.py  │  ← Stage 1: スクリーニング  │      snap.py        │  ← 単発取得・即時要約
+└─────────────────────┘                        └─────────────────────┘
+      │                                                     │
+      ├── screened/YYYY-MM-DD.json      （生データ・機械用）   │
       └── review/YYYY-MM-DD.md          （レビューファイル・人間用）
-                                               │
-                              [人間がタグを書き込む → タグ付き = 要約対象]
-                                               │
-                               ┌───────────────────────────┐
-                               │   stage2_summarize.py     │  ← Stage 2: 要約（将来実装）
-                               └───────────────────────────┘
-                                               │
-                                  digest/YYYY-MM/SOURCE_ID.md
+                                               │             │
+                              [人間がタグを書き込む]           │
+                                               │             │
+                               ┌───────────────────────────┐ │
+                               │   stage2_summarize.py     │ │
+                               └───────────────────────────┘ │
+                                               │             │
+                                  digest/YYYY-MM/{source}_{id}_{slug}.md
                                   （論文1件につき1ファイル）
 ```
 
@@ -60,12 +61,12 @@ gleampaper/
 │   │   └── YYYY-MM-DD.json
 │   └── review/
 │       └── YYYY-MM-DD.md
-├── digest/                        # Stage 2 要約出力（論文ごとに 1 ファイル）
+├── digest/                        # Stage 2 / snap 要約出力（論文ごとに 1 ファイル）
 │   └── YYYY-MM/
-│       ├── arxiv_2602.12345.md
-│       └── arxiv_2602.23456.md
+│       └── arxiv_2602.12345_improving-chain-of-thought.md
 ├── stage1_screen.py               # Stage 1 スクリプト
 ├── stage2_summarize.py            # Stage 2 スクリプト
+├── snap.py                        # 単発取得・即時要約スクリプト
 ├── requirements.txt
 └── .gitignore
 ```
@@ -163,19 +164,7 @@ topics:
 | 入力 | 説明 |
 |------|------|
 | `config/interests.yaml` | 監視カテゴリ・キーワード・タグ・スコア閾値 |
-| arXiv API | 新着論文（平日のみ取得） |
-
-### タイムゾーン
-
-arXiv の `submittedDate` は **UTC 基準**。`date.today()` はローカル（JST）の日付を返すため、
-UTC ではまだ存在しない日付をクエリして 0 件になることがある。
-そのため **デフォルトは `datetime.now(timezone.utc).date()`（UTC 当日）** を使用する。
-
-```
-JST 10:00 (UTC+9) → UTC 01:00 → UTC 当日 = JST 昨日分の論文を正しく取得
-```
-
-明示的に日付を指定したい場合は `--date YYYY-MM-DD` を使用する。
+| arXiv API | 新着論文 |
 
 ### 動作モード
 
@@ -188,18 +177,22 @@ python stage1_screen.py
 1. `screened/` と `archive/screened/` から最終取得日を自動検出
 2. 翌日〜UTC 今日の範囲を一括 fetch（API 呼び出し 1 回）
 3. `result.published.date()` で日付ごとに分割・スクリーニング
-4. 結果のある日付だけファイルを生成（空白日は自動スキップ）
+4. 結果のある日付だけファイルを生成（空白日・インデックスラグは自動スキップ）
 
 arXiv の検索インデックスラグや週末の空白日を意識せず運用できる。
 
-#### 単日モード（日付指定）
+#### 単日モード（日付指定 / --rescreen / --force）
 
 ```
-python stage1_screen.py 2026-02-18
+python stage1_screen.py 2026-02-18          # 指定日を取得
+python stage1_screen.py -re 2026-02-18      # 再スクリーニング（既存タグ保持）
+python stage1_screen.py -re                 # 最新レビューファイルを再スクリーニング
+python stage1_screen.py --force 2026-02-18  # 既存ファイルを上書き
 ```
 
-指定日（`effective_days_back` で月曜は週末分も含む）を単独取得。
-`--rescreen` / `--force` は単日モードのみ有効。
+- `effective_days_back` により月曜指定時は週末分も含む範囲を取得
+- `-re` / `--rescreen` に日付を省略すると `review/` 内の最新ファイルを対象とする
+- 既存タグは `← restored` マーカー付きで復元される
 
 ### 処理フロー（インクリメンタルモード）
 
@@ -237,6 +230,7 @@ score = Σ( マッチしたキーワードが属するトピックの weight × 
       "categories": ["cs.LG", "cs.AI"],
       "url": "https://arxiv.org/abs/2602.12345",
       "pdf_url": "https://arxiv.org/pdf/2602.12345",
+      "date_published": "2026-02-19",
       "score": 27.0,
       "matched_topics": [
         {
@@ -244,12 +238,6 @@ score = Σ( マッチしたキーワードが属するトピックの weight × 
           "tag": "llm",
           "weight": 10,
           "matched_keywords": ["LLM", "instruction tuning", "chain of thought"]
-        },
-        {
-          "topic": "Agents & Planning",
-          "tag": "agents",
-          "weight": 9,
-          "matched_keywords": ["agent", "reasoning"]
         }
       ]
     }
@@ -268,7 +256,7 @@ score = Σ( マッチしたキーワードが属するトピックの weight × 
 # arXiv Review — 2026-02-19
 > 取得: 412件 → スクリーニング: 43件
 > `tags:` にタグを書いた論文が要約されます → `python stage2_summarize.py`
-> タグ例: llm, agents, diffusion, quantum
+> 利用可能なタグ: llm, agents, diffusion
 
 ---
 
@@ -279,7 +267,7 @@ Smith, J., Lee, K. | cs.LG, cs.AI | [arxiv](https://arxiv.org/abs/2602.12345) | 
 > We propose a method that combines RL with CoT prompting. Our approach achieves
 > 15% improvement on reasoning benchmarks by assigning step-level rewards...
 
-tags:
+tags: llm, agents  ← restored
 
 ---
 
@@ -299,6 +287,7 @@ tags:
 - スコア降順で並べる
 - `suggested:` は matched_topics の tag を列挙（参考表示）
 - `tags:` 行はユーザーが編集する欄。カンマ区切りで複数タグ可
+- `← restored` は `-re` 実行時に既存タグが復元されたことを示すマーカー（stage2 が除去して読む）
 - アブストラクトは冒頭 2〜3 文のみ（全文は JSON に保存）
 - `<!-- source: ... | id: ... -->` コメントに識別子を埋め込み（Stage 2 が参照）
 - `[PDF]` リンクを arXiv abstract リンクの隣に配置（クリックでブラウザ表示）
@@ -315,7 +304,6 @@ tags:
 ```
 
 プレビューは `Cmd+Shift+V` で開く（または右上の Preview アイコン）。
-編集中に `Cmd+Click` でもリンクを直接開ける。
 
 **VSCode での操作イメージ：**
 
@@ -343,7 +331,7 @@ tags: llm, mynewtag  ← 独自タグを追加することも可
 1. `review/YYYY-MM-DD.md` から `tags:` が空でない論文を抽出（ID・タグ一覧を取得）
 2. `screened/YYYY-MM-DD.json`（なければ `archive/screened/` も参照）から該当論文のフルデータを取得
 3. スコア上位 `top_n` 件について PDF をダウンロードし Claude API に送信して要約生成（`--skip-pdf` 時はアブストラクトのみ送信）
-4. 論文ごとに `digest/YYYY-MM/SOURCE_ID.md` を生成
+4. 論文ごとに `digest/YYYY-MM/{source}_{id}_{slug}.md` を生成
 5. 処理完了後、`review/YYYY-MM-DD.md` と `screened/YYYY-MM-DD.json` を `archive/` に移動（`--no-archive` で無効化）
 
 ### PDF 全文モード（デフォルト）
@@ -353,18 +341,8 @@ tags: llm, mynewtag  ← 独自タグを追加することも可
 
 - PDF ダウンロードに失敗した場合はアブストラクトのみにフォールバック
 - トークン消費が増えるため、コスト・速度が気になる場合は `--skip-pdf` を使用
-- `--skip-pdf` 時は「情報が不十分で答えられない項目は **（アブストラクトからは不明）**」と注記される
-
-### 引用数取得（snap のみ）
-
-`snap.py` は要約前に **Google Scholar** から引用数を自動取得し、digest のフロントマターと
-ヘッダーに記録する（`scholarly` ライブラリ使用）。
-
-- 取得に成功した場合: `citation_count: 42`（整数）
-- 取得に失敗した場合: `citation_count: null`、ヘッダーは「取得不可」と表示
-- `scholarly` がインストールされていない場合は警告のみ（要約処理は継続）
-
-`stage2_summarize.py` はバッチ処理のため引用数取得は行わない（レート制限のリスクを避けるため）。
+- `--skip-pdf` 時は答えられない項目に「**（アブストラクトからは不明）**」と注記
+- PDF 全文時は「**（論文に記載なし）**」と注記
 
 ### 要約フォーマット（6項目）
 
@@ -381,12 +359,12 @@ tags: llm, mynewtag  ← 独自タグを追加することも可
 | 5 | **議論はある？** | 限界・課題・議論点 |
 | 6 | **次に読むべき論文は？** | 論文内で言及された重要な関連研究 |
 
-### 出力: `digest/YYYY-MM/SOURCE_ID.md`（論文 1 件につき 1 ファイル）
+### 出力: `digest/YYYY-MM/{source}_{source_id}_{slug}.md`（論文 1 件につき 1 ファイル）
 
 YAML フロントマターにメタデータを持たせることで、ビューアや HTML 変換ツールと連携しやすくする。
 
-**ファイル名規則：** `{source}_{source_id}.md`
-例: `arxiv_2602.12345.md`、将来的に `ieee_1234567.md`
+**ファイル名規則：** `{source}_{source_id}_{タイトル先頭のスラッグ}.md`
+例: `arxiv_2602.12345_Improving-Chain-of-Thought-Reasoning.md`
 
 ```markdown
 ---
@@ -399,7 +377,6 @@ authors:
   - "Lee, K."
 date_published: "2026-02-19"
 date_gleaned: "2026-02-19"
-citation_count: 42
 tags:
   - llm
   - agents
@@ -410,38 +387,16 @@ score: 27.0
 
 **Authors**: Smith, J., Lee, K.
 **Published**: 2026-02-19
-**Citations**: 42
 **Tags**: `llm` `agents`
 **URL**: https://arxiv.org/abs/2602.12345
 **PDF**: https://arxiv.org/pdf/2602.12345
 
 ### 1. どんなもの？
-CoT プロンプティングに強化学習を組み合わせ、LLM の多段階推論精度を向上させる手法の提案。
-
-### 2. 先行研究と比べてどこがすごい？
-ステップ単位の報酬設計により、既存の最終出力ベースの RL より細粒度な誤り訂正が可能。
-
-### 3. 技術や手法の肝はどこ？
-各推論ステップに個別の報酬を与え、誤ったステップを直接ペナルティとして学習する。
-  - PPO（強化学習アルゴリズム）
-  - GPT-4（ベースモデル）
-
-### 4. どうやって有効だと検証した？
-GSM8K・MATH・BBH の3ベンチマークで SOTA と比較し、平均 15% の精度向上を確認。
-  - GSM8K、MATH、BBH（評価データセット）
-
-### 5. 議論はある？
-報酬モデルの品質に性能が依存するため、報酬ハッキングのリスクがある。
-ステップ単位のアノテーションコストが高く、大規模適用に課題が残る。
-
-### 6. 次に読むべき論文は？
-（アブストラクトからは不明）
-
-## Abstract
-
-We propose a method that combines reinforcement learning with chain-of-thought
-prompting to improve multi-step reasoning...
+...
 ```
+
+> `citation_count` は `snap.py` のみ付与する。`stage2_summarize.py` はバッチ処理のため
+> レート制限リスクを避けて引用数取得を行わない。
 
 **フロントマターを持たせる理由：**
 
@@ -450,7 +405,64 @@ prompting to improve multi-step reasoning...
 | ビューア連携 | Obsidian 等でタグ・日付によるフィルタリングが可能 |
 | HTML 変換 | `pandoc` でメタデータ付き HTML に変換可能 |
 | 将来の検索 | フロントマターを読む簡易インデックスを作りやすい |
-| 拡張性 | IEEE Xplore 等の別ソースも同じ構造で収容できる |
+| 拡張性 | 別ソースも同じ構造で収容できる |
+
+---
+
+## snap.py: 単発取得・即時要約
+
+URL を 1 件指定して即時に取得・要約するツール。バッチではなくアドホックな調査に使う。
+
+### 対応ソース
+
+| ソース | URL 例 |
+|--------|--------|
+| arXiv | `https://arxiv.org/abs/2602.XXXXX` |
+| OpenReview | `https://openreview.net/forum?id=XXXXX` |
+| IEEE Xplore | `https://ieeexplore.ieee.org/document/XXXXXXX` |
+
+### 処理フロー
+
+1. URL からソースを判定し、メタデータ（タイトル・著者・アブストラクト）を取得
+2. `interests.yaml` のキーワードに照合し、スコア上位トピックのタグを自動付与
+3. Google Scholar から引用数を取得（`scholarly` ライブラリ、未インストール時は警告のみ）
+4. PDF をダウンロードし Claude API で要約生成（`--skip-pdf` 時はアブストラクトのみ）
+5. `digest/YYYY-MM/{source}_{id}_{slug}.md` に保存
+
+### 自動タグ付与
+
+`interests.yaml` の全トピックに対してスコアを計算し、上位 N 件（デフォルト 5）のタグを自動付与する。
+`--tags` で手動上書きも可能。
+
+### 出力フォーマット
+
+`stage2_summarize.py` と同じ 6 項目フォーマット。引用数フィールドが追加される点が異なる。
+
+```markdown
+---
+title: "..."
+source: arxiv
+source_id: "2602.12345"
+citation_count: 42        # snap.py のみ付与
+tags:
+  - llm
+---
+
+**Citations**: 42
+```
+
+`citation_count: null` の場合はヘッダーに「取得不可」と表示。
+
+### CLI
+
+```
+python snap.py <URL>                  # PDF全文モード（デフォルト）
+python snap.py <URL> --skip-pdf       # アブストラクトのみ
+python snap.py <URL> --tags llm,agents  # タグを手動指定
+python snap.py <URL> --top 3          # 自動タグ上位 N 件（デフォルト 5）
+python snap.py <URL> --force          # digest が既存でも上書き
+python snap.py <URL> --dry-run        # API 呼び出しなし（メタデータ表示のみ）
+```
 
 ---
 
@@ -466,10 +478,14 @@ python stage1_screen.py 2026-02-18
 # Stage 1: 設定確認（キーワード統計・カバレッジ）
 python stage1_screen.py --check
 
+# Stage 1: 既存ファイルを再スクリーニング（タグ保持）
+python stage1_screen.py -re               # 最新レビューファイルを対象
+python stage1_screen.py -re 2026-02-18    # 日付指定
+
 # VSCode でレビューファイルを開く
 code review/2026-02-19.md
 
-# Stage 2: タグ付き論文を要約 → 完了後に archive/ へ自動移動（デフォルト）
+# Stage 2: タグ付き論文を要約 → 完了後に archive/ へ自動移動
 python stage2_summarize.py
 
 # Stage 2: アーカイブせず処理のみ（再処理など）
@@ -481,11 +497,22 @@ python stage2_summarize.py --skip-pdf
 # Stage 2: 日付指定
 python stage2_summarize.py --date 2026-02-18
 
-# snap: URL を指定して1件だけ即時取得・要約（PDF全文モード・デフォルト）
+# snap: URL を指定して1件だけ即時取得・要約
 python snap.py https://arxiv.org/abs/2602.XXXXX
+python snap.py https://openreview.net/forum?id=XXXXX
+python snap.py https://ieeexplore.ieee.org/document/XXXXXXX
 
-# snap: アブストラクトのみ
-python snap.py https://arxiv.org/abs/2602.XXXXX --skip-pdf
+# snap: アブストラクトのみ（PDF スキップ）
+python snap.py <URL> --skip-pdf
+
+# snap: タグを手動指定
+python snap.py <URL> --tags llm,agents
+
+# snap: 自動タグ上位 3 件のみ付与
+python snap.py <URL> --top 3
+
+# snap: 内容確認のみ（API 呼び出しなし）
+python snap.py <URL> --dry-run
 ```
 
 ---
@@ -502,10 +529,12 @@ python snap.py https://arxiv.org/abs/2602.XXXXX --skip-pdf
 |------|---------|
 | `stage1_screen.py` | ✅ 管理対象 |
 | `stage2_summarize.py` | ✅ 管理対象 |
+| `snap.py` | ✅ 管理対象 |
 | `config/interests.yaml` | ✅ テンプレートとして管理 |
 | `config/summarize.yaml` | ✅ テンプレートとして管理 |
 | `screened/*.json` | ❌ ローカルのみ |
 | `review/*.md` | ❌ ローカルのみ |
+| `archive/**` | ❌ ローカルのみ |
 | `digest/**/*.md` | ❌ ローカルのみ |
 
 ---
@@ -513,6 +542,5 @@ python snap.py https://arxiv.org/abs/2602.XXXXX --skip-pdf
 ## 将来拡張
 
 - **フェーズ 3**: スクリーニング済み論文からキーワードを自動抽出し `interests.yaml` に追記提案
-- **IEEE Xplore 対応**: `fetch` に `source` 設定を追加し複数ソースに対応（ファイル名は `ieee_ID.md`）
 - **インデックス生成**: `digest/` 以下のフロントマターを読んでタグ別・日付別の一覧 Markdown を自動生成
 - **通知連携**: レビューファイル生成後に Slack / メール で通知
