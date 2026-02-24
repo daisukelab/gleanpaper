@@ -1,7 +1,7 @@
 version: 1
 
 # ══════════════════════════════════════════════════════════════════════════════
-# gleampaper — interests.yaml
+# gleanpaper — interests.yaml
 # ══════════════════════════════════════════════════════════════════════════════
 # arXiv カテゴリ一覧: https://arxiv.org/category_taxonomy
 
@@ -19,6 +19,7 @@ fetch:
       - stat.ML                 # Machine Learning (Statistics)
   days_back: 1                  # 何日前まで遡るか（月曜は自動的に 3 に拡張）
   max_results: 500              # API 1回あたりの最大取得件数
+  overlap_days: 2               # 増分フェッチで前回取得日より何日前まで遡るか（締め切り後投稿の遅延インデックス対策）
 
 # ── スクリーニング設定 ────────────────────────────────────────────────────────
 screening:

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-gleampaper — Stage 2: Summarize
+gleanpaper — Stage 2: Summarize
 
 Reads tagged papers from review/YYYY-MM-DD.md,
 fetches their data from screened/YYYY-MM-DD.json,
@@ -9,10 +9,10 @@ and generates per-paper summaries using Claude API.
 Output: digest/YYYY-MM/SOURCE_ID.md  (one file per paper, with YAML frontmatter)
 
 Usage:
-  python stage2_summarize.py                    # latest review file
-  python stage2_summarize.py --date 2026-02-19
-  python stage2_summarize.py --dry-run          # show tagged papers, no API call
-  python stage2_summarize.py --force            # re-summarize even if digest exists
+  python 2_summarize.py                    # latest review file
+  python 2_summarize.py --date 2026-02-19
+  python 2_summarize.py --dry-run          # show tagged papers, no API call
+  python 2_summarize.py --force            # re-summarize even if digest exists
 
 Requires:
   ANTHROPIC_API_KEY environment variable (or .env file)
@@ -203,7 +203,7 @@ def build_prompt_fullpdf(paper: dict, tags: list) -> str:
 def download_pdf(url: str, timeout: int = 30) -> bytes | None:
     """Download PDF from URL. Returns bytes or None on failure."""
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "gleampaper/1.0"})
+        req = urllib.request.Request(url, headers={"User-Agent": "gleanpaper/1.0"})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.read()
     except Exception as e:
@@ -352,7 +352,7 @@ def digest_path_for(paper: dict, target_date: date) -> Path:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="gleampaper Stage 2 — summarize tagged papers via Claude API"
+        description="gleanpaper Stage 2 — summarize tagged papers via Claude API"
     )
     parser.add_argument(
         "--date", metavar="YYYY-MM-DD",
@@ -389,7 +389,7 @@ def main():
         review_path = find_latest_review()
         target_date = date.fromisoformat(review_path.stem)
 
-    print(f"gleampaper Stage 2 — {target_date}")
+    print(f"gleanpaper Stage 2 — {target_date}")
     print("─" * 52)
 
     # Parse tagged papers from review file

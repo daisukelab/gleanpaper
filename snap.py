@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-gleampaper — snap
+gleanpaper — snap
 
 Fetch and summarize a single paper from its URL.
 Tags are auto-assigned from config/interests.yaml (top-N by keyword match score).
@@ -477,7 +477,7 @@ def build_prompt_fullpdf(paper: dict, tags: list) -> str:
 def download_pdf(url: str, timeout: int = 30) -> bytes | None:
     """Download PDF from URL. Returns bytes or None on failure."""
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "gleampaper/1.0"})
+        req = urllib.request.Request(url, headers={"User-Agent": "gleanpaper/1.0"})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.read()
     except Exception as e:
@@ -631,7 +631,7 @@ def digest_path_for(paper: dict, gleaned_date: datetime.date) -> Path:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="gleampaper snap — fetch and summarize a single paper from URL"
+        description="gleanpaper snap — fetch and summarize a single paper from URL"
     )
     parser.add_argument("url", help="Paper URL (arXiv, OpenReview, or IEEE Xplore)")
     parser.add_argument(
@@ -659,7 +659,7 @@ def main():
     interests = load_interests()
     sum_cfg = load_summarize_config()
 
-    print("gleampaper snap")
+    print("gleanpaper snap")
     print("─" * 52)
 
     # ── Step 1: Fetch metadata ────────────────────────────────────────────────

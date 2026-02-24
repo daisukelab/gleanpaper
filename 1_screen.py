@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-gleampaper — Stage 1: Screen
+gleanpaper — Stage 1: Screen
 
 Fetches papers from arXiv and screens them against config/interests.yaml.
 
@@ -9,12 +9,12 @@ Outputs:
   review/YYYY-MM-DD.md       human review file (write tags to select papers for Stage 2)
 
 Usage:
-  python stage1_screen.py                  # インクリメンタル（前回取得日の翌日〜今日）
-  python stage1_screen.py 2026-02-18       # 単日モード（指定日のみ取得）
-  python stage1_screen.py -re              # 最新レビューを再スクリーニング（タグ保持）
-  python stage1_screen.py -re 2026-02-18   # 日付指定 + re-screen
-  python stage1_screen.py --force          # re-screen、既存ファイルを上書き
-  python stage1_screen.py --check          # show config statistics
+  python 1_screen.py                  # インクリメンタル（前回取得日の翌日〜今日）
+  python 1_screen.py 2026-02-18       # 単日モード（指定日のみ取得）
+  python 1_screen.py -re              # 最新レビューを再スクリーニング（タグ保持）
+  python 1_screen.py -re 2026-02-18   # 日付指定 + re-screen
+  python 1_screen.py --force          # re-screen、既存ファイルを上書き
+  python 1_screen.py --check          # show config statistics
 
 【インクリメンタルモードについて】
   引数なしで実行すると screened/ および archive/screened/ の最終日付を検出し、
@@ -374,7 +374,7 @@ def save_review_md(
     lines = [
         f"# arXiv Review — {target_date}",
         f"> 取得: {fetched}件 → スクリーニング: {len(papers)}件",
-        f"> `tags:` にタグを書いた論文が要約されます → `python stage2_summarize.py`",
+        f"> `tags:` にタグを書いた論文が要約されます → `python 2_summarize.py`",
         f"> 利用可能なタグ: {', '.join(available_tags)}",
     ]
     if header_note:
@@ -430,7 +430,7 @@ def cmd_check(config: dict) -> None:
     primary = fetch_cfg.get("categories", {}).get("primary", [])
     secondary = fetch_cfg.get("categories", {}).get("secondary", [])
 
-    print("=== gleampaper — config check ===\n")
+    print("=== gleanpaper — config check ===\n")
     print(f"  Primary categories   : {', '.join(primary)}")
     print(f"  Secondary categories : {', '.join(secondary)}")
     print(f"  max_results          : {fetch_cfg.get('max_results', 500)}")
@@ -464,7 +464,7 @@ def cmd_check(config: dict) -> None:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="gleampaper Stage 1 — fetch and screen arXiv papers"
+        description="gleanpaper Stage 1 — fetch and screen arXiv papers"
     )
     parser.add_argument(
         "date",
@@ -534,7 +534,7 @@ def main():
             else:
                 print(f"[info] No tags found in existing review file.")
 
-        print(f"gleampaper Stage 1 — {target_date}")
+        print(f"gleanpaper Stage 1 — {target_date}")
         print("─" * 52)
 
         fetch_cfg = config.get("fetch", {})
@@ -574,7 +574,7 @@ def main():
         print("Done. Open the review file and add tags:")
         print(f"  code {review_path}")
         print("Then run Stage 2:")
-        print("  python stage2_summarize.py")
+        print("  python 2_summarize.py")
         return
 
     # ── Incremental mode (no args) ─────────────────────────────────────────────
@@ -583,19 +583,24 @@ def main():
         sys.exit(
             "[error] スクリーニング済みファイルが見つかりません。\n"
             "        初回は日付を指定して実行してください:\n"
-            "          python stage1_screen.py YYYY-MM-DD"
+            "          python 1_screen.py YYYY-MM-DD"
         )
 
-    start_date = last_date + timedelta(days=1)
     end_date = datetime.now(timezone.utc).date()
+    fetch_cfg = config.get("fetch", {})
+    overlap_days = fetch_cfg.get("overlap_days", 2)
+    # overlap_days: 前回取得日より何日前まで遡るか（締め切り後投稿の遅延インデックス対策）
+    # 例: overlap_days=2 → last_date-1 から取得（前日締め切り後投稿を翌日に取り込める）
+    start_date = last_date + timedelta(days=1) - timedelta(days=overlap_days)
 
-    if start_date > end_date:
+    new_start = last_date + timedelta(days=1)
+    if new_start > end_date:
         print(f"[info] 最終取得日: {last_date} — すでに最新です。")
         return
 
-    print(f"gleampaper Stage 1 — incremental ({start_date} – {end_date})")
+    print(f"gleanpaper Stage 1 — incremental ({start_date} – {end_date})")
     print("─" * 52)
-    print(f"[info] 最終取得日: {last_date}")
+    print(f"[info] 最終取得日: {last_date} (overlap: {overlap_days}日前から再チェック)")
 
     print("\n[1/3] Fetching papers from arXiv...")
     raw, fetched = fetch_arxiv(config, start_date, end_date)
@@ -606,33 +611,60 @@ def main():
     min_score = config.get("screening", {}).get("min_score", 5)
 
     created = []
+    overlaps_found = []
     for d in sorted(by_date.keys()):
         papers = by_date[d]
-        print(f"      {d}: {len(papers)}件 passed")
-        save_screened_json(papers, d, fetched)
-        save_review_md(papers, d, fetched, config)
-        created.append(d)
+        existing_json = SCREENED_DIR / f"{d}.json"
 
-    if not created:
+        if d <= last_date and existing_json.exists():
+            # Overlap day: 既存ファイルに漏れ論文だけ追加（上書きしない）
+            with open(existing_json, encoding="utf-8") as f:
+                old = json.load(f)
+            old_ids = {p["source_id"] for p in old["papers"]}
+            new_papers = [p for p in papers if p["source_id"] not in old_ids]
+            if new_papers:
+                top_n = config.get("screening", {}).get("top_n", 50)
+                merged = old["papers"] + new_papers
+                merged.sort(key=lambda p: p["score"], reverse=True)
+                merged = merged[:top_n]
+                save_screened_json(merged, d, old["fetched_count"])
+                existing_tags = parse_existing_tags(REVIEW_DIR / f"{d}.md")
+                save_review_md(merged, d, old["fetched_count"], config, existing_tags)
+                print(f"      {d}: +{len(new_papers)}件 追加 (遅延インデックス論文を発見)")
+                overlaps_found.append((d, new_papers))
+            else:
+                print(f"      {d}: 変更なし (overlap チェック済み)")
+        else:
+            print(f"      {d}: {len(papers)}件 passed")
+            save_screened_json(papers, d, fetched)
+            save_review_md(papers, d, fetched, config)
+            created.append(d)
+
+    if not created and not overlaps_found:
         print("      → 新規ファイルなし")
         if fetched == 0:
             print(
-                f"      (arXiv インデックスが {start_date} 以降の論文を"
+                f"      (arXiv インデックスが {new_start} 以降の論文を"
                 f"まだ収録していない可能性があります)"
             )
         print("\n" + "─" * 52)
         return
 
-    print(f"\n[3/3] {len(created)}日分のファイルを生成しました:")
+    print(f"\n[3/3] ファイルを生成/更新しました:")
     for d in created:
-        print(f"      review/{d}.md")
+        print(f"      [新規] review/{d}.md")
+    for d, papers in overlaps_found:
+        ids = ", ".join(p["source_id"] for p in papers)
+        print(f"      [更新] review/{d}.md (+{len(papers)}件: {ids})")
 
     print("\n" + "─" * 52)
     print("Done. Open the review file(s) and add tags:")
     for d in created:
         print(f"  code review/{d}.md")
+    for d, _ in overlaps_found:
+        print(f"  code review/{d}.md  ← 追加論文あり")
     print("Then run Stage 2:")
-    print("  python stage2_summarize.py")
+    print("  python 2_summarize.py")
 
 
 if __name__ == "__main__":

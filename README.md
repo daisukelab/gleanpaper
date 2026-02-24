@@ -1,4 +1,4 @@
-# gleampaper
+# gleanpaper
 
 **Daily arXiv paper screening and summarization tool with human-in-the-loop tagging.**
 
@@ -6,7 +6,7 @@
 
 ## Overview
 
-gleampaper helps you stay on top of the latest research without being overwhelmed.
+gleanpaper helps you stay on top of the latest research without being overwhelmed.
 It fetches new arXiv preprints every day, scores them against your personal interest list,
 and generates a review file where you tag the papers you actually care about.
 Tagged papers are then sent to an LLM (Claude API) for focused summarization.
@@ -70,7 +70,7 @@ with `enabled: false` without losing your keyword list.
 
 ```bash
 # Verify your config is valid and see keyword statistics
-python stage1_screen.py --check
+python 1_screen.py --check
 ```
 
 ---
@@ -85,13 +85,13 @@ pip install -r requirements.txt
 cp config/examples/interests.yaml.example config/interests.yaml
 
 # Fetch and screen today's papers
-python stage1_screen.py
+python 1_screen.py
 
 # Open the review file in VSCode (Cmd+Shift+V to open preview pane)
 code review/$(date +%Y-%m-%d).md
 
 # After tagging, run summarization (Stage 2 — coming soon)
-python stage2_summarize.py
+python 2_summarize.py
 ```
 
 ---
@@ -99,9 +99,9 @@ python stage2_summarize.py
 ## Repository Structure
 
 ```
-gleampaper/
-├── stage1_screen.py          # Stage 1: fetch and screen arXiv papers
-├── stage2_summarize.py       # Stage 2: LLM summarization (coming soon)
+gleanpaper/
+├── 1_screen.py          # Stage 1: fetch and screen arXiv papers
+├── 2_summarize.py       # Stage 2: LLM summarization (coming soon)
 ├── config/
 │   ├── interests.yaml        # Your personal interest list
 │   └── examples/
